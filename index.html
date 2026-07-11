@@ -280,14 +280,14 @@
     const z=standardized(use),n=z.length,p=z[0].length;if(n<2)throw new Error("PCA requires at least two observations.");let c;
     if(p<=n){c=Array.from({length:p},()=>Array(p).fill(0));for(let i=0;i<p;i++)for(let j=i;j<p;j++){let v=0;for(let t=0;t<n;t++)v+=z[t][i]*z[t][j];c[i][j]=c[j][i]=v/(n-1);}}
     else{c=Array.from({length:n},()=>Array(n).fill(0));for(let i=0;i<n;i++)for(let j=i;j<n;j++){let v=0;for(let f=0;f<p;f++)v+=z[i][f]*z[j][f];c[i][j]=c[j][i]=v/(n-1);}}
-    const vals=jacobi(c).filter(v=>v>1e-9).slice(0,Math.min(n-1,p)),total=vals.reduce((a,b)=>a+b,0)||1;return vals.map(v=>v/total);
+    const raw=jacobi(c),scale=Math.max(1,...raw.map(v=>Math.abs(v))),vals=raw.filter(v=>Number.isFinite(v)&&v>Number.EPSILON*scale*100).slice(0,Math.min(n-1,p)),total=vals.reduce((a,b)=>a+b,0);if(!vals.length||!Number.isFinite(total)||total<=0)throw new Error("PCA found no usable variance. Check the dimension assignments and verify that the selected observations are not identical.");return vals.map(v=>v/total);
   }
   function metrics(ratios,threshold){let c=0,k=ratios.length;for(let i=0;i<ratios.length;i++){c+=ratios[i];if(c>=threshold){k=i+1;break;}}const pr=1/(ratios.reduce((s,v)=>s+v*v,0)||1);return {k,pr};}
 
   function analyzeAll() {
     if(!participants.length)return;
     betweenGlobalRatios=null;
-    participants.forEach(p=>p.ratios=spectrum(p.matrix));
+    participants.forEach(p=>p.ratios=null);
     const select=$("ndx-participant"),keep=select.value;select.innerHTML='<option value="group">Group summary</option>'+participants.map((p,i)=>'<option value="'+i+'">'+p.name.replace(/[<>&]/g,"")+'</option>').join("");if([...select.options].some(o=>o.value===keep))select.value=keep;
     const minT=Math.min(...participants.map(p=>p.matrix.length)),minF=Math.min(...participants.map(p=>p.matrix[0].length)),same=participants.every(p=>p.matrix.length===participants[0].matrix.length&&p.matrix[0].length===participants[0].matrix[0].length);
     $("ndx-shape").textContent=(same?participants[0].matrix.length:minT+"+")+" × "+(same?participants[0].matrix[0].length:minF+"+")+" × "+participants.length;
@@ -297,15 +297,17 @@
 
   function selectedParticipants(){const v=$("ndx-participant").value;return v==="group"?participants:[participants[Number(v)]];}
   function betweenMatrix(start,end,maxColumns){
-    if(participants.length<2)throw new Error("Between-participant PCA requires at least two participants.");const minT=Math.min(...participants.map(p=>p.matrix.length)),minF=Math.min(...participants.map(p=>p.matrix[0].length));start=Math.max(0,start);end=Math.min(end,minT);const total=(end-start)*minF,count=Math.min(maxColumns||800,total),indices=Array.from({length:count},(_,i)=>Math.min(total-1,Math.floor(i*total/count)));
+    if(participants.length<2)throw new Error("Between-participant PCA requires at least two participants.");const minT=Math.min(...participants.map(p=>p.matrix.length)),minF=Math.min(...participants.map(p=>p.matrix[0].length));start=Math.max(0,start);end=Math.min(end,minT);const total=(end-start)*minF,target=Math.min(maxColumns||800,total),candidateCount=Math.min(6000,total),candidates=Array.from({length:candidateCount},(_,i)=>Math.min(total-1,Math.floor(i*total/candidateCount))),informative=[];
+    for(const idx of candidates){const t=start+Math.floor(idx/minF),f=idx%minF,values=participants.map(p=>p.matrix[t][f]),lo=Math.min(...values),hi=Math.max(...values),magnitude=Math.max(1,Math.abs(lo),Math.abs(hi));if(Number.isFinite(lo)&&Number.isFinite(hi)&&hi-lo>Number.EPSILON*magnitude*100)informative.push(idx);}
+    if(!informative.length)throw new Error("No measurements vary across participants in this interval. Verify that the participant axis is assigned correctly and that participant data are not identical.");const count=Math.min(target,informative.length),indices=Array.from({length:count},(_,i)=>informative[Math.min(informative.length-1,Math.floor(i*informative.length/count))]);
     return participants.map(p=>indices.map(idx=>p.matrix[start+Math.floor(idx/minF)][idx%minF]));
   }
   function spectraForView(){
     const between=$("ndx-analysis-mode").value==="between";$("ndx-participant").disabled=between;
-    if(!between)return selectedParticipants();if(!betweenGlobalRatios){const minT=Math.min(...participants.map(p=>p.matrix.length));betweenGlobalRatios=spectrum(betweenMatrix(0,minT,800),800);}return [{name:"Between participants",ratios:betweenGlobalRatios}];
+    if(!between){const selected=selectedParticipants();selected.forEach(p=>{if(!p.ratios)p.ratios=spectrum(p.matrix);});return selected;}if(!betweenGlobalRatios){const minT=Math.min(...participants.map(p=>p.matrix.length));betweenGlobalRatios=spectrum(betweenMatrix(0,minT,800),800);}return [{name:"Between participants",ratios:betweenGlobalRatios}];
   }
   function updateView(){
-    let ps;try{ps=spectraForView();}catch(err){$("ndx-status").textContent=err.message;return;}const between=$("ndx-analysis-mode").value==="between",threshold=Number($("ndx-threshold").value)/100,ms=ps.map(p=>metrics(p.ratios,threshold));
+    let ps;try{ps=spectraForView();}catch(err){$("ndx-k").textContent="—";$("ndx-pr").textContent="—";clear($("ndx-spectrum"));$("ndx-status").textContent=err.message;return;}const between=$("ndx-analysis-mode").value==="between",threshold=Number($("ndx-threshold").value)/100,ms=ps.map(p=>metrics(p.ratios,threshold));
     $("ndx-threshold-value").textContent=Math.round(threshold*100)+"%";
     $("ndx-k").textContent=ps.length>1?mean(ms.map(m=>m.k)).toFixed(1)+" ± "+sd(ms.map(m=>m.k)).toFixed(1):String(ms[0].k);
     $("ndx-pr").textContent=ps.length>1?mean(ms.map(m=>m.pr)).toFixed(2)+" ± "+sd(ms.map(m=>m.pr)).toFixed(2):ms[0].pr.toFixed(2);
