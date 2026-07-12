@@ -48,6 +48,10 @@
   </header>
   <div class="explorer-shell">
 <div id="ndx-root">
+  <div id="ndx-busy" class="ndx-busy" role="status" aria-live="polite" hidden>
+    <span class="ndx-spinner" aria-hidden="true"></span>
+    <div><strong id="ndx-busy-text">Calculating PCA…</strong><div id="ndx-busy-progress" class="text-small">Please keep this tab open.</div></div>
+  </div>
   <div class="viz-controls">
     <label class="form-label">Data files
       <input id="ndx-files" class="form-control" type="file" accept=".csv,.tsv,.txt,.json,.mat,.npy,.npz" multiple>
@@ -55,6 +59,7 @@
     <label id="ndx-array-label" class="form-label" hidden>Array / variable
       <select id="ndx-array" class="form-control"></select>
     </label>
+    <button id="ndx-use-array" class="btn" type="button" hidden>Analyze selected array</button>
     <label class="form-label">Dimension 1 <span class="text-small">(rows)</span>
       <select id="ndx-axis-1" class="form-control"><option value="time">Time</option><option value="features">Features</option><option value="participants">Participants</option></select>
     </label>
@@ -124,6 +129,10 @@
 
 <style>
   #ndx-root { color: var(--foreground); display: grid; gap: 16px; width: 100%; }
+  #ndx-root .ndx-busy { position:sticky; top:12px; z-index:10; display:flex; align-items:center; gap:12px; padding:12px 14px; border:1px solid var(--border); border-radius:12px; background:var(--card); color:var(--card-foreground); box-shadow:0 10px 30px rgba(36,54,91,.14); }
+  #ndx-root .ndx-busy[hidden] { display:none; }
+  #ndx-root .ndx-spinner { width:22px; height:22px; flex:0 0 auto; border:3px solid var(--muted); border-top-color:var(--viz-series-1); border-radius:50%; animation:ndx-spin .8s linear infinite; }
+  @keyframes ndx-spin { to { transform:rotate(360deg); } }
   #ndx-root .ndx-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   #ndx-root .viz-stat { display: grid; gap: 4px; }
   #ndx-root section { display: grid; gap: 12px; }
@@ -150,6 +159,12 @@
   let sourceNames = [];
   let loadedArrays = [];
   let betweenGlobalRatios = null;
+  let activeArrayIndex = -1;
+  let pcaJob = 0;
+  let timeJob = 0;
+  let lastDrawnSpectra = [];
+  function nextPaint(){return new Promise(resolve=>window.requestAnimationFrame(()=>resolve()));}
+  function setBusy(on,text,progress){$("ndx-busy").hidden=!on;if(text)$("ndx-busy-text").textContent=text;if(progress!==undefined)$("ndx-busy-progress").textContent=progress;}
 
   function rngFactory(seed) { return function () { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
   function normal(rng) { const u = Math.max(rng(), 1e-9); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * rng()); }
@@ -162,7 +177,9 @@
     sourceCube = null;
     sourceNames = [];
     loadedArrays = [];
+    activeArrayIndex = -1;
     $("ndx-array-label").hidden=true;
+    $("ndx-use-array").hidden=true;
     $("ndx-axis-1").value="time";$("ndx-axis-2").value="features";$("ndx-axis-3").value="participants";
     const n=240,p=36,count=12,latent=5;
     participants=Array.from({length:count},(_,s)=>{
@@ -251,10 +268,10 @@
     if(!arrays.length)throw new Error("No supported real numeric 2D or 3D array was found. MATLAB v7.3/HDF5, structs, cells, sparse arrays, and complex arrays are not supported.");return arrays;
   }
   function selectLoadedArray(index) {
-    const item=loadedArrays[index];if(!item)return;sourceCube=item.cube;sourceNames=item.participantNames||[];participants=cubeToParticipants(sourceCube,sourceNames);$("ndx-status").textContent="Using "+item.name+" with stored shape "+sourceCube.length+" × "+sourceCube[0].length+" × "+sourceCube[0][0].length+", interpreted as "+participants[0].matrix.length+" time points × "+participants[0].matrix[0].length+" features × "+participants.length+" participants.";analyzeAll();
+    const item=loadedArrays[index];if(!item)return;activeArrayIndex=index;$("ndx-array").value=String(index);sourceCube=item.cube;sourceNames=item.participantNames||[];participants=cubeToParticipants(sourceCube,sourceNames);$("ndx-status").textContent="Using "+item.name+" with stored shape "+sourceCube.length+" × "+sourceCube[0].length+" × "+sourceCube[0][0].length+", interpreted as "+participants[0].matrix.length+" time points × "+participants[0].matrix[0].length+" features × "+participants.length+" participants.";analyzeAll();
   }
   function showLoadedArrays() {
-    const select=$("ndx-array");select.innerHTML=loadedArrays.map((a,i)=>'<option value="'+i+'">'+a.name.replace(/[<>&]/g,"")+" — "+a.cube.length+" × "+a.cube[0].length+" × "+a.cube[0][0].length+'</option>').join("");$("ndx-array-label").hidden=loadedArrays.length<2;selectLoadedArray(0);
+    const select=$("ndx-array");select.innerHTML=loadedArrays.map((a,i)=>'<option value="'+i+'">'+a.name.replace(/[<>&]/g,"")+" — "+a.cube.length+" × "+a.cube[0].length+" × "+a.cube[0][0].length+'</option>').join("");select.selectedIndex=0;activeArrayIndex=-1;$("ndx-array-label").hidden=loadedArrays.length<2;$("ndx-use-array").hidden=loadedArrays.length<2;selectLoadedArray(0);
   }
   function axisAssignment() {
     const labels=[$("ndx-axis-1").value,$("ndx-axis-2").value,$("ndx-axis-3").value];
@@ -272,11 +289,11 @@
 
   function standardized(x) {const n=x.length,p=x[0].length,mu=Array(p).fill(0),ss=Array(p).fill(0);x.forEach(r=>r.forEach((v,j)=>mu[j]+=v/n));x.forEach(r=>r.forEach((v,j)=>ss[j]+=(v-mu[j])*(v-mu[j])));for(let j=0;j<p;j++)ss[j]=Math.sqrt(ss[j]/Math.max(1,n-1))||1;return x.map(r=>r.map((v,j)=>(v-mu[j])/ss[j]));}
   function jacobi(a) {
-    const n=a.length,m=a.map(r=>r.slice()),limit=Math.max(50,n*n*8);
-    for(let iter=0;iter<limit;iter++){let p=0,q=Math.min(1,n-1),mx=0;for(let i=0;i<n;i++)for(let j=i+1;j<n;j++)if(Math.abs(m[i][j])>mx){mx=Math.abs(m[i][j]);p=i;q=j;}if(mx<1e-9)break;const phi=.5*Math.atan2(2*m[p][q],m[q][q]-m[p][p]),c=Math.cos(phi),s=Math.sin(phi),app=c*c*m[p][p]-2*s*c*m[p][q]+s*s*m[q][q],aqq=s*s*m[p][p]+2*s*c*m[p][q]+c*c*m[q][q];for(let k=0;k<n;k++)if(k!==p&&k!==q){const x=m[k][p],y=m[k][q];m[k][p]=m[p][k]=c*x-s*y;m[k][q]=m[q][k]=s*x+c*y;}m[p][p]=app;m[q][q]=aqq;m[p][q]=m[q][p]=0;}return m.map((r,i)=>Math.max(0,r[i])).sort((a,b)=>b-a);
+    const n=a.length,m=a.map(r=>r.slice()),maxSweeps=24;
+    for(let sweep=0;sweep<maxSweeps;sweep++){let largest=0,diagScale=0;for(let i=0;i<n;i++)diagScale=Math.max(diagScale,Math.abs(m[i][i]));for(let p=0;p<n-1;p++)for(let q=p+1;q<n;q++){const apq=m[p][q];largest=Math.max(largest,Math.abs(apq));if(Math.abs(apq)<=Number.EPSILON*Math.max(1,diagScale)*100)continue;const app=m[p][p],aqq=m[q][q],tau=(aqq-app)/(2*apq),t=(tau>=0?1:-1)/(Math.abs(tau)+Math.sqrt(1+tau*tau)),c=1/Math.sqrt(1+t*t),s=t*c;for(let k=0;k<n;k++)if(k!==p&&k!==q){const mkp=m[k][p],mkq=m[k][q];m[k][p]=m[p][k]=c*mkp-s*mkq;m[k][q]=m[q][k]=s*mkp+c*mkq;}m[p][p]=app-t*apq;m[q][q]=aqq+t*apq;m[p][q]=m[q][p]=0;}if(largest<=1e-10*Math.max(1,diagScale))break;}return m.map((r,i)=>Math.max(0,r[i])).sort((a,b)=>b-a);
   }
   function spectrum(x,maxFeatures) {
-    maxFeatures=maxFeatures||100;let use=x;const originalP=x[0].length;if(originalP>maxFeatures){const indices=Array.from({length:maxFeatures},(_,i)=>Math.min(originalP-1,Math.floor(i*originalP/maxFeatures)));use=x.map(r=>indices.map(j=>r[j]));}
+    maxFeatures=maxFeatures===undefined?Infinity:maxFeatures;let use=x;const originalP=x[0].length;if(originalP>maxFeatures){const indices=Array.from({length:maxFeatures},(_,i)=>Math.min(originalP-1,Math.floor(i*originalP/maxFeatures)));use=x.map(r=>indices.map(j=>r[j]));}
     const z=standardized(use),n=z.length,p=z[0].length;if(n<2)throw new Error("PCA requires at least two observations.");let c;
     if(p<=n){c=Array.from({length:p},()=>Array(p).fill(0));for(let i=0;i<p;i++)for(let j=i;j<p;j++){let v=0;for(let t=0;t<n;t++)v+=z[t][i]*z[t][j];c[i][j]=c[j][i]=v/(n-1);}}
     else{c=Array.from({length:n},()=>Array(n).fill(0));for(let i=0;i<n;i++)for(let j=i;j<n;j++){let v=0;for(let f=0;f<p;f++)v+=z[i][f]*z[j][f];c[i][j]=c[j][i]=v/(n-1);}}
@@ -287,8 +304,9 @@
   function analyzeAll() {
     if(!participants.length)return;
     betweenGlobalRatios=null;
+    lastDrawnSpectra=[];
     participants.forEach(p=>p.ratios=null);
-    const select=$("ndx-participant"),keep=select.value;select.innerHTML='<option value="group">Group summary</option>'+participants.map((p,i)=>'<option value="'+i+'">'+p.name.replace(/[<>&]/g,"")+'</option>').join("");if([...select.options].some(o=>o.value===keep))select.value=keep;
+    const select=$("ndx-participant");select.innerHTML='<option value="group">Group summary</option>'+participants.map((p,i)=>'<option value="'+i+'">'+p.name.replace(/[<>&]/g,"")+'</option>').join("");select.value="group";
     const minT=Math.min(...participants.map(p=>p.matrix.length)),minF=Math.min(...participants.map(p=>p.matrix[0].length)),same=participants.every(p=>p.matrix.length===participants[0].matrix.length&&p.matrix[0].length===participants[0].matrix[0].length);
     $("ndx-shape").textContent=(same?participants[0].matrix.length:minT+"+")+" × "+(same?participants[0].matrix[0].length:minF+"+")+" × "+participants.length;
     $("ndx-window").max=Math.max(10,Math.min(200,minT));if(Number($("ndx-window").value)>minT)$("ndx-window").value=Math.max(10,Math.floor(minT/3));
@@ -302,18 +320,19 @@
     if(!informative.length)throw new Error("No measurements vary across participants in this interval. Verify that the participant axis is assigned correctly and that participant data are not identical.");const count=Math.min(target,informative.length),indices=Array.from({length:count},(_,i)=>informative[Math.min(informative.length-1,Math.floor(i*informative.length/count))]);
     return participants.map(p=>indices.map(idx=>p.matrix[start+Math.floor(idx/minF)][idx%minF]));
   }
-  function spectraForView(){
+  async function spectraForView(job){
     const between=$("ndx-analysis-mode").value==="between";$("ndx-participant").disabled=between;
-    if(!between){const selected=selectedParticipants();selected.forEach(p=>{if(!p.ratios)p.ratios=spectrum(p.matrix);});return selected;}if(!betweenGlobalRatios){const minT=Math.min(...participants.map(p=>p.matrix.length));betweenGlobalRatios=spectrum(betweenMatrix(0,minT,800),800);}return [{name:"Between participants",ratios:betweenGlobalRatios}];
+    if(!between){const selected=selectedParticipants(),missing=selected.filter(p=>!p.ratios);if(missing.length){setBusy(true,"Calculating full-feature dual PCA…","0 of "+missing.length+" participants");await nextPaint();for(let i=0;i<missing.length;i++){if(job!==pcaJob)return null;missing[i].ratios=spectrum(missing[i].matrix,Infinity);setBusy(true,"Calculating full-feature dual PCA…",(i+1)+" of "+missing.length+" participants · all "+missing[i].matrix[0].length+" features");await nextPaint();}}return selected;}
+    if(!betweenGlobalRatios){setBusy(true,"Calculating between-participant PCA…","Preparing participant comparison");await nextPaint();if(job!==pcaJob)return null;const minT=Math.min(...participants.map(p=>p.matrix.length));betweenGlobalRatios=spectrum(betweenMatrix(0,minT,800),800);}return [{name:"Between participants",ratios:betweenGlobalRatios}];
   }
-  function updateView(){
-    let ps;try{ps=spectraForView();}catch(err){$("ndx-k").textContent="—";$("ndx-pr").textContent="—";clear($("ndx-spectrum"));$("ndx-status").textContent=err.message;return;}const between=$("ndx-analysis-mode").value==="between",threshold=Number($("ndx-threshold").value)/100,ms=ps.map(p=>metrics(p.ratios,threshold));
+  async function updateView(){
+    const job=++pcaJob;let ps;try{ps=await spectraForView(job);if(!ps||job!==pcaJob)return;}catch(err){if(job!==pcaJob)return;$("ndx-k").textContent="—";$("ndx-pr").textContent="—";clear($("ndx-spectrum"));$("ndx-status").textContent=err.message;setBusy(false);return;}const between=$("ndx-analysis-mode").value==="between",threshold=Number($("ndx-threshold").value)/100,ms=ps.map(p=>metrics(p.ratios,threshold));
     $("ndx-threshold-value").textContent=Math.round(threshold*100)+"%";
     $("ndx-k").textContent=ps.length>1?mean(ms.map(m=>m.k)).toFixed(1)+" ± "+sd(ms.map(m=>m.k)).toFixed(1):String(ms[0].k);
     $("ndx-pr").textContent=ps.length>1?mean(ms.map(m=>m.pr)).toFixed(2)+" ± "+sd(ms.map(m=>m.pr)).toFixed(2):ms[0].pr.toFixed(2);
     $("ndx-k-note").textContent=between?"Dimensions separating participants":ps.length>1?"Mean ± SD across participants":"For selected participant";
     $("ndx-pr-note").textContent=between?"Between-participant effective dimensions":ps.length>1?"Group mean ± SD":"Selected participant";
-    drawSpectrum(ps);if(!$("ndx-time-panel").hidden)updateTime();
+    lastDrawnSpectra=ps;drawSpectrum(ps);setBusy(false);if(!$("ndx-time-panel").hidden)updateTime();
   }
 
   function svgEl(name,attrs,text){const e=document.createElementNS("http://www.w3.org/2000/svg",name);Object.entries(attrs||{}).forEach(([k,v])=>e.setAttribute(k,v));if(text!==undefined)e.textContent=text;return e;}
@@ -337,10 +356,11 @@
   }
 
   function timeSeries(p,win,step,threshold,metric){const out=[];for(let start=0;start+win<=p.matrix.length;start+=step){const m=metrics(spectrum(p.matrix.slice(start,start+win)),threshold);out.push({x:start+win/2,y:metric==="pr"?m.pr:m.k});}return out;}
-  function updateTime(){
-    const between=$("ndx-analysis-mode").value==="between",base=between?participants:selectedParticipants(),win=Math.min(Number($("ndx-window").value),...base.map(p=>p.matrix.length)),step=Number($("ndx-step").value),threshold=Number($("ndx-threshold").value)/100,metric=$("ndx-metric").value;$("ndx-window-value").textContent=win;$("ndx-step-value").textContent=step;let pts=[];
-    if(between){const minT=Math.min(...participants.map(p=>p.matrix.length));for(let start=0;start+win<=minT;start+=step){const m=metrics(spectrum(betweenMatrix(start,start+win,800),800),threshold),v=metric==="pr"?m.pr:m.k;pts.push({x:start+win/2,mean:v,min:v,max:v});}drawTime(pts,metric==="pr"?"Between-participant participation ratio":"Dimensions separating participants",false);$("ndx-time-summary").textContent=pts.length?"Each window distinguishes "+participants.length+" participants using up to 800 evenly sampled time–feature measurements.":"Window is too long for these data.";}
-    else{const series=base.map(p=>timeSeries(p,win,step,threshold,metric)),len=Math.min(...series.map(s=>s.length));pts=Array.from({length:len},(_,i)=>{const vals=series.map(s=>s[i].y);return {x:series[0][i].x,mean:mean(vals),min:Math.min(...vals),max:Math.max(...vals)};});drawTime(pts,metric==="pr"?"Within-participant participation ratio":"Within-participant dimensions for threshold",base.length>1);const ys=pts.map(p=>p.mean);$("ndx-time-summary").textContent=pts.length?((base.length>1?"Group mean across "+base.length+" participants":"Selected participant")+" · temporal mean "+mean(ys).toFixed(2)+" · range of means "+Math.min(...ys).toFixed(2)+"–"+Math.max(...ys).toFixed(2)):"Window is too long for these data.";}
+  async function updateTime(){
+    const job=++timeJob,between=$("ndx-analysis-mode").value==="between",base=between?participants:selectedParticipants(),win=Math.min(Number($("ndx-window").value),...base.map(p=>p.matrix.length)),step=Number($("ndx-step").value),threshold=Number($("ndx-threshold").value)/100,metric=$("ndx-metric").value;$("ndx-window-value").textContent=win;$("ndx-step-value").textContent=step;let pts=[];setBusy(true,"Calculating sliding-window PCA…","Preparing windows");await nextPaint();
+    try{if(between){const minT=Math.min(...participants.map(p=>p.matrix.length)),starts=[];for(let start=0;start+win<=minT;start+=step)starts.push(start);for(let i=0;i<starts.length;i++){if(job!==timeJob)return;const start=starts[i],m=metrics(spectrum(betweenMatrix(start,start+win,800),800),threshold),v=metric==="pr"?m.pr:m.k;pts.push({x:start+win/2,mean:v,min:v,max:v});if(i%2===1||i===starts.length-1){setBusy(true,"Calculating sliding-window PCA…",(i+1)+" of "+starts.length+" windows");await nextPaint();}}drawTime(pts,metric==="pr"?"Between-participant participation ratio":"Dimensions separating participants",false);$("ndx-time-summary").textContent=pts.length?"Each window distinguishes "+participants.length+" participants using up to 800 evenly sampled time–feature measurements.":"Window is too long for these data.";}
+    else{const series=[];for(let i=0;i<base.length;i++){if(job!==timeJob)return;series.push(timeSeries(base[i],win,step,threshold,metric));setBusy(true,"Calculating full-feature sliding-window PCA…",(i+1)+" of "+base.length+" participants · all "+base[i].matrix[0].length+" features");await nextPaint();}const len=Math.min(...series.map(s=>s.length));pts=Array.from({length:len},(_,i)=>{const vals=series.map(s=>s[i].y);return {x:series[0][i].x,mean:mean(vals),min:Math.min(...vals),max:Math.max(...vals)};});drawTime(pts,metric==="pr"?"Within-participant participation ratio":"Within-participant dimensions for threshold",base.length>1);const ys=pts.map(p=>p.mean);$("ndx-time-summary").textContent=pts.length?((base.length>1?"Group mean across "+base.length+" participants":"Selected participant")+" · temporal mean "+mean(ys).toFixed(2)+" · range of means "+Math.min(...ys).toFixed(2)+"–"+Math.max(...ys).toFixed(2)):"Window is too long for these data.";}}
+    catch(err){if(job===timeJob)$("ndx-status").textContent=err.message;}finally{if(job===timeJob)setBusy(false);}
   }
   function drawTime(points,label,band){const svg=$("ndx-time-chart");clear(svg);const d=dims(svg);if(!points.length)return;const x=d.l,y=28,w=d.w-d.l-d.r,h=310,max=Math.max(...points.map(p=>p.max))*1.08||1;svg.appendChild(svgEl("text",{x,y:15,fill:"var(--foreground)","font-weight":500},label+" in sliding windows"));addGrid(svg,x,y,w,h,max,4,false);const last=points[points.length-1].x||1;if(band)svg.appendChild(svgEl("path",{d:areaPath(points,x,y,w,h,max),fill:"var(--muted)",stroke:"none"}));svg.appendChild(svgEl("path",{d:linePath(points,x,y,w,h,max),fill:"none",stroke:"var(--viz-series-1)","stroke-width":3}));svg.appendChild(svgEl("text",{x:x+w/2,y:380,"text-anchor":"middle",fill:"var(--muted-foreground)"},"Window center (time point; final center "+Math.round(last)+")"));}
 
@@ -360,12 +380,16 @@
     showLoadedArrays();
   }catch(err){$("ndx-status").textContent="Could not analyze the selected data: "+err.message;}});
   function reinterpretAxes(){if(!sourceCube)return;try{participants=cubeToParticipants(sourceCube,sourceNames);$("ndx-status").textContent="Axes reinterpreted as "+participants[0].matrix.length+" time points × "+participants[0].matrix[0].length+" features × "+participants.length+" participants.";analyzeAll();}catch(err){$("ndx-status").textContent=err.message;}}
-  $("ndx-demo").addEventListener("click",simulate);$("ndx-array").addEventListener("change",e=>selectLoadedArray(Number(e.target.value)));$("ndx-threshold").addEventListener("input",()=>{updateView();if($("ndx-metric").value==="pr"&&!$("ndx-time-panel").hidden)$("ndx-time-summary").textContent="Participation ratio uses the full PCA spectrum, so changing the variance threshold does not change this time course.";});$("ndx-analysis-mode").addEventListener("change",updateView);$("ndx-components").addEventListener("change",updateView);$("ndx-participant").addEventListener("change",updateView);$("ndx-axis-1").addEventListener("change",reinterpretAxes);$("ndx-axis-2").addEventListener("change",reinterpretAxes);$("ndx-axis-3").addEventListener("change",reinterpretAxes);$("ndx-window").addEventListener("input",updateTime);$("ndx-step").addEventListener("input",updateTime);$("ndx-metric").addEventListener("change",updateTime);$("ndx-tab-spectrum").addEventListener("click",()=>setTab("spectrum"));$("ndx-tab-time").addEventListener("click",()=>setTab("time"));window.addEventListener("resize",()=>{if(participants.length){try{drawSpectrum(spectraForView());if(!$("ndx-time-panel").hidden)updateTime();}catch(err){}}});
+  function applySelectedArray(){const index=Number($("ndx-array").value);if(index!==activeArrayIndex)selectLoadedArray(index);}
+  function refreshMode(){if($("ndx-analysis-mode").value==="within")$("ndx-participant").value="group";updateView();}
+  function refreshParticipant(){updateView();}
+  function refreshMetric(){updateTime();}
+  $("ndx-demo").addEventListener("click",simulate);$("ndx-array").addEventListener("input",applySelectedArray);$("ndx-array").addEventListener("change",applySelectedArray);$("ndx-use-array").addEventListener("click",()=>selectLoadedArray(Number($("ndx-array").value)));$("ndx-threshold").addEventListener("input",()=>{updateView();if($("ndx-metric").value==="pr"&&!$("ndx-time-panel").hidden)$("ndx-time-summary").textContent="Participation ratio uses the full PCA spectrum, so changing the variance threshold does not change this time course.";});$("ndx-analysis-mode").addEventListener("input",refreshMode);$("ndx-analysis-mode").addEventListener("change",refreshMode);$("ndx-components").addEventListener("input",updateView);$("ndx-components").addEventListener("change",updateView);$("ndx-participant").addEventListener("input",refreshParticipant);$("ndx-participant").addEventListener("change",refreshParticipant);$("ndx-axis-1").addEventListener("input",reinterpretAxes);$("ndx-axis-1").addEventListener("change",reinterpretAxes);$("ndx-axis-2").addEventListener("input",reinterpretAxes);$("ndx-axis-2").addEventListener("change",reinterpretAxes);$("ndx-axis-3").addEventListener("input",reinterpretAxes);$("ndx-axis-3").addEventListener("change",reinterpretAxes);$("ndx-window").addEventListener("input",updateTime);$("ndx-step").addEventListener("input",updateTime);$("ndx-metric").addEventListener("input",refreshMetric);$("ndx-metric").addEventListener("change",refreshMetric);$("ndx-tab-spectrum").addEventListener("click",()=>setTab("spectrum"));$("ndx-tab-time").addEventListener("click",()=>setTab("time"));window.addEventListener("resize",()=>{if(lastDrawnSpectra.length)drawSpectrum(lastDrawnSpectra);if(!$("ndx-time-panel").hidden)updateTime();});
   simulate();
 })();
 </script>
   </div>
-  <footer>Neural Dimensionality Explorer · Gabriel Braun</footer>
+  <footer>Neural Dimensionality Explorer · Gabriel Braun · v1.6</footer>
 </main>
 </body>
 </html>
