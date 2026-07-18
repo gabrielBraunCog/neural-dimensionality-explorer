@@ -13,6 +13,7 @@ An interactive, browser-based tool for exploring neural dimensionality with PCA.
 - CSV, TSV, JSON, MATLAB `.mat`, NumPy `.npy`, and `.npz` input
 - Local browser processing: uploaded neural data are not sent to a server
 - Visible calculation progress for group and sliding-window analyses
+- Responsive, cancelable recalculation when arrays, participants, modes, windows, or thresholds change
 
 ## Publish with GitHub Pages
 
