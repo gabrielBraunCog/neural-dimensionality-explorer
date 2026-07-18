@@ -129,6 +129,7 @@
 
 <style>
   #ndx-root { color: var(--foreground); display: grid; gap: 16px; width: 100%; }
+  #ndx-root [hidden] { display: none !important; }
   #ndx-root .ndx-busy { position:sticky; top:12px; z-index:10; display:flex; align-items:center; gap:12px; padding:12px 14px; border:1px solid var(--border); border-radius:12px; background:var(--card); color:var(--card-foreground); box-shadow:0 10px 30px rgba(36,54,91,.14); }
   #ndx-root .ndx-busy[hidden] { display:none; }
   #ndx-root .ndx-spinner { width:22px; height:22px; flex:0 0 auto; border:3px solid var(--muted); border-top-color:var(--viz-series-1); border-radius:50%; animation:ndx-spin .8s linear infinite; }
@@ -406,7 +407,7 @@
 })();
 </script>
   </div>
-  <footer>Neural Dimensionality Explorer · Gabriel Braun · v1.8</footer>
+  <footer>Neural Dimensionality Explorer · Gabriel Braun · v1.9</footer>
 </main>
 </body>
 </html>

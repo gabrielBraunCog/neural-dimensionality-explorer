@@ -16,6 +16,7 @@ An interactive, browser-based tool for exploring neural dimensionality with PCA.
 - Responsive, cancelable recalculation when arrays, participants, modes, windows, or thresholds change
 - Consistent missing-data handling: features containing non-finite values are excluded across all participants
 - Memory-efficient MATLAB decoding for large numeric arrays
+- Correct tab visibility so sliding-window PCA runs only when Across time is selected
 
 ## Publish with GitHub Pages
 
