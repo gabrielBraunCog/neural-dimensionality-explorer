@@ -163,8 +163,10 @@
   let pcaJob = 0;
   let timeJob = 0;
   let fileJob = 0;
+  let axisJob = 0;
   let lastDrawnSpectra = [];
   let lastDrawnTime = null;
+  let withinFeatureIndices = [];
   let timeTimer = null;
   let busyOwner = "";
   function nextPaint(){return new Promise(resolve=>window.requestAnimationFrame(()=>window.setTimeout(resolve,0)));}
@@ -250,15 +252,17 @@
     if(smallBytes){return {type:raw&65535,bytes:smallBytes,dataOffset:offset+4,next:offset+8};}
     const bytes=view.getUint32(offset+4,little),padded=Math.ceil(bytes/8)*8;return {type:raw,bytes,dataOffset:offset+8,next:offset+8+(compressedTop?bytes:padded)};
   }
+  const hostIsLittleEndian=new Uint8Array(new Uint16Array([1]).buffer)[0]===1;
   function matNumbers(view,tag,little) {
-    const sizes={1:1,2:1,3:2,4:2,5:4,6:4,7:4,9:8,12:8,13:8},size=sizes[tag.type];if(!size)return [];
+    const sizes={1:1,2:1,3:2,4:2,5:4,6:4,7:4,9:8,12:8,13:8},ctors={1:Int8Array,2:Uint8Array,3:Int16Array,4:Uint16Array,5:Int32Array,6:Uint32Array,7:Float32Array,9:Float64Array},size=sizes[tag.type];if(!size)return [];
     const n=Math.floor(tag.bytes/size),out=new Array(n),o=tag.dataOffset;
+    const Ctor=ctors[tag.type],absolute=view.byteOffset+o;if(Ctor&&little===hostIsLittleEndian&&absolute%size===0)return new Ctor(view.buffer,absolute,n);
     for(let i=0;i<n;i++){const p=o+i*size;switch(tag.type){case 1:out[i]=view.getInt8(p);break;case 2:out[i]=view.getUint8(p);break;case 3:out[i]=view.getInt16(p,little);break;case 4:out[i]=view.getUint16(p,little);break;case 5:out[i]=view.getInt32(p,little);break;case 6:out[i]=view.getUint32(p,little);break;case 7:out[i]=view.getFloat32(p,little);break;case 9:out[i]=view.getFloat64(p,little);break;case 12:out[i]=Number(view.getBigInt64(p,little));break;case 13:out[i]=Number(view.getBigUint64(p,little));break;}}return out;
   }
   function matlabFlatToCube(flat,dims,label) {
-    dims=dims.filter(d=>d>0);if(dims.length!==2&&dims.length!==3)throw new Error(label+" has unsupported shape "+dims.join(" × ")+"; only 2D and 3D arrays are supported.");
+    dims=Array.from(dims).filter(d=>d>0);if(dims.length!==2&&dims.length!==3)throw new Error(label+" has unsupported shape "+dims.join(" × ")+"; only 2D and 3D arrays are supported.");
     const d1=dims[0],d2=dims[1],d3=dims.length===3?dims[2]:1;if(flat.length<d1*d2*d3)throw new Error(label+" contains fewer values than its dimensions specify.");
-    return Array.from({length:d1},(_,i)=>Array.from({length:d2},(_,j)=>Array.from({length:d3},(_,k)=>Number(flat[i+d1*(j+d2*k)]))));
+    return {shape:[d1,d2,d3],data:flat,layout:"matlab-column-major"};
   }
   function parseMatMatrix(buffer,little) {
     const view=new DataView(buffer),matrix=matTag(view,0,little,false);if(matrix.type!==14)throw new Error("Compressed MAT block does not contain a matrix.");let o=matrix.dataOffset;
@@ -269,14 +273,16 @@
   async function parseMatBuffer(buffer) {
     const header=new TextDecoder().decode(new Uint8Array(buffer,0,Math.min(128,buffer.byteLength)));if(header.includes("MATLAB 7.3 MAT-file"))throw new Error("MATLAB v7.3/HDF5 files are not yet supported. Save with -v7 or upload .npy/.npz.");if(buffer.byteLength<128)throw new Error("This file is too short to be a MAT file.");
     const bytes=new Uint8Array(buffer),little=String.fromCharCode(bytes[126],bytes[127])==="IM",view=new DataView(buffer),arrays=[];let o=128;
-    while(o+8<=buffer.byteLength){const tag=matTag(view,o,little,false);try{if(tag.type===14){const exact=buffer.slice(o,o+8+Math.ceil(tag.bytes/8)*8),item=parseMatMatrix(exact,little);if(item)arrays.push(item);}else if(tag.type===15){const zip=await import("https://cdn.jsdelivr.net/npm/fflate@0.8.2/+esm"),compressed=new Uint8Array(buffer,tag.dataOffset,tag.bytes),plain=zip.unzlibSync(compressed),exact=plain.buffer.slice(plain.byteOffset,plain.byteOffset+plain.byteLength),item=parseMatMatrix(exact,little);if(item)arrays.push(item);}}catch(err){}o=tag.type===15?tag.dataOffset+tag.bytes:tag.next;}
+    while(o+8<=buffer.byteLength){const tag=matTag(view,o,little,false);try{if(tag.type===14){const exact=buffer.slice(o,o+8+Math.ceil(tag.bytes/8)*8),item=parseMatMatrix(exact,little);if(item)arrays.push(item);}else if(tag.type===15){const zip=await import("https://cdn.jsdelivr.net/npm/fflate@0.8.2/+esm"),compressed=new Uint8Array(buffer,tag.dataOffset,tag.bytes),plain=zip.unzlibSync(compressed),exact=plain.byteOffset===0&&plain.byteLength===plain.buffer.byteLength?plain.buffer:plain.buffer.slice(plain.byteOffset,plain.byteOffset+plain.byteLength),item=parseMatMatrix(exact,little);if(item)arrays.push(item);}}catch(err){}o=tag.type===15?tag.dataOffset+tag.bytes:tag.next;}
     if(!arrays.length)throw new Error("No supported real numeric 2D or 3D array was found. MATLAB v7.3/HDF5, structs, cells, sparse arrays, and complex arrays are not supported.");return arrays;
   }
-  function selectLoadedArray(index) {
-    const item=loadedArrays[index];if(!item)return;activeArrayIndex=index;$("ndx-array").value=String(index);sourceCube=item.cube;sourceNames=item.participantNames||[];participants=cubeToParticipants(sourceCube,sourceNames);$("ndx-status").textContent="Using "+item.name+" with stored shape "+sourceCube.length+" × "+sourceCube[0].length+" × "+sourceCube[0][0].length+", interpreted as "+participants[0].matrix.length+" time points × "+participants[0].matrix[0].length+" features × "+participants.length+" participants.";analyzeAll();
+  function cubeShape(cube){return cube&&cube.shape&&cube.data?cube.shape:[cube.length,cube[0].length,cube[0][0].length];}
+  function cubeValue(cube,i,j,k){if(cube&&cube.shape&&cube.data){const d1=cube.shape[0],d2=cube.shape[1];return Number(cube.data[i+d1*(j+d2*k)]);}return cube[i][j][k];}
+  async function selectLoadedArray(index) {
+    const item=loadedArrays[index];if(!item)return;const job=++axisJob,owner="axes:"+job;activeArrayIndex=index;$("ndx-array").value=String(index);showBusy(owner,"Preparing selected array…","Applying the dimension assignments");await nextPaint();if(job!==axisJob)return;try{sourceCube=item.cube;sourceNames=item.participantNames||[];participants=cubeToParticipants(sourceCube,sourceNames);const stored=cubeShape(sourceCube);$("ndx-status").textContent="Using "+item.name+" with stored shape "+stored.join(" × ")+", interpreted as "+participants[0].matrix.length+" time points × "+participants[0].matrix[0].length+" features × "+participants.length+" participants.";analyzeAll();}catch(err){$("ndx-status").textContent=err.message;}finally{hideBusy(owner);}
   }
   function showLoadedArrays() {
-    const select=$("ndx-array");select.innerHTML=loadedArrays.map((a,i)=>'<option value="'+i+'">'+a.name.replace(/[<>&]/g,"")+" — "+a.cube.length+" × "+a.cube[0].length+" × "+a.cube[0][0].length+'</option>').join("");select.selectedIndex=0;activeArrayIndex=-1;$("ndx-array-label").hidden=loadedArrays.length<2;$("ndx-use-array").hidden=loadedArrays.length<2;selectLoadedArray(0);
+    const select=$("ndx-array");select.innerHTML=loadedArrays.map((a,i)=>'<option value="'+i+'">'+a.name.replace(/[<>&]/g,"")+" — "+cubeShape(a.cube).join(" × ")+'</option>').join("");select.selectedIndex=0;activeArrayIndex=-1;$("ndx-array-label").hidden=loadedArrays.length<2;$("ndx-use-array").hidden=loadedArrays.length<2;selectLoadedArray(0);
   }
   function axisAssignment() {
     const labels=[$("ndx-axis-1").value,$("ndx-axis-2").value,$("ndx-axis-3").value];
@@ -284,21 +290,22 @@
     return labels;
   }
   function cubeToParticipants(cube,participantNames) {
-    const labels=axisAssignment(),dims=[cube.length,cube[0].length,cube[0][0].length],ta=labels.indexOf("time"),fa=labels.indexOf("features"),pa=labels.indexOf("participants");
+    const labels=axisAssignment(),dims=cubeShape(cube),ta=labels.indexOf("time"),fa=labels.indexOf("features"),pa=labels.indexOf("participants");
+    if(cube&&cube.shape&&cube.data){const strides=[1,dims[0],dims[0]*dims[1]],featureStride=strides[fa];return Array.from({length:dims[pa]},(_,s)=>{const matrix=Array.from({length:dims[ta]},(_,t)=>{const base=s*strides[pa]+t*strides[ta];if(featureStride===1&&cube.data.subarray)return cube.data.subarray(base,base+dims[fa]);const row=new Array(dims[fa]);for(let f=0;f<dims[fa];f++)row[f]=Number(cube.data[base+f*featureStride]);return row;});const name=pa===2&&participantNames&&participantNames[s]?participantNames[s]:"Participant "+(s+1);return {name,matrix};});}
     return Array.from({length:dims[pa]},(_,s)=>{
-      const matrix=Array.from({length:dims[ta]},(_,t)=>Array.from({length:dims[fa]},(_,f)=>{const idx=[];idx[ta]=t;idx[fa]=f;idx[pa]=s;return cube[idx[0]][idx[1]][idx[2]];}));
+      const matrix=Array.from({length:dims[ta]},(_,t)=>Array.from({length:dims[fa]},(_,f)=>{const idx=[];idx[ta]=t;idx[fa]=f;idx[pa]=s;return cubeValue(cube,idx[0],idx[1],idx[2]);}));
       const name=pa===2&&participantNames&&participantNames[s]?participantNames[s]:"Participant "+(s+1);
       return {name,matrix};
     });
   }
 
-  function standardized(x) {const n=x.length,p=x[0].length,mu=Array(p).fill(0),ss=Array(p).fill(0);x.forEach(r=>r.forEach((v,j)=>mu[j]+=v/n));x.forEach(r=>r.forEach((v,j)=>ss[j]+=(v-mu[j])*(v-mu[j])));for(let j=0;j<p;j++)ss[j]=Math.sqrt(ss[j]/Math.max(1,n-1))||1;return x.map(r=>r.map((v,j)=>(v-mu[j])/ss[j]));}
+  function standardized(x) {const n=x.length,p=x[0].length,mu=Array(p).fill(0),ss=Array(p).fill(0);x.forEach(r=>r.forEach((v,j)=>mu[j]+=v/n));x.forEach(r=>r.forEach((v,j)=>ss[j]+=(v-mu[j])*(v-mu[j])));for(let j=0;j<p;j++)ss[j]=Math.sqrt(ss[j]/Math.max(1,n-1))||1;return x.map(r=>Array.from(r,(v,j)=>(v-mu[j])/ss[j]));}
   function jacobi(a) {
     const n=a.length,m=a.map(r=>r.slice()),maxSweeps=24;
     for(let sweep=0;sweep<maxSweeps;sweep++){let largest=0,diagScale=0;for(let i=0;i<n;i++)diagScale=Math.max(diagScale,Math.abs(m[i][i]));for(let p=0;p<n-1;p++)for(let q=p+1;q<n;q++){const apq=m[p][q];largest=Math.max(largest,Math.abs(apq));if(Math.abs(apq)<=Number.EPSILON*Math.max(1,diagScale)*100)continue;const app=m[p][p],aqq=m[q][q],tau=(aqq-app)/(2*apq),t=(tau>=0?1:-1)/(Math.abs(tau)+Math.sqrt(1+tau*tau)),c=1/Math.sqrt(1+t*t),s=t*c;for(let k=0;k<n;k++)if(k!==p&&k!==q){const mkp=m[k][p],mkq=m[k][q];m[k][p]=m[p][k]=c*mkp-s*mkq;m[k][q]=m[q][k]=s*mkp+c*mkq;}m[p][p]=app-t*apq;m[q][q]=aqq+t*apq;m[p][q]=m[q][p]=0;}if(largest<=1e-10*Math.max(1,diagScale))break;}return m.map((r,i)=>Math.max(0,r[i])).sort((a,b)=>b-a);
   }
-  function spectrum(x,maxFeatures) {
-    maxFeatures=maxFeatures===undefined?Infinity:maxFeatures;let use=x;const originalP=x[0].length;if(originalP>maxFeatures){const indices=Array.from({length:maxFeatures},(_,i)=>Math.min(originalP-1,Math.floor(i*originalP/maxFeatures)));use=x.map(r=>indices.map(j=>r[j]));}
+  function spectrum(x,maxFeatures,featureIndices) {
+    maxFeatures=maxFeatures===undefined?Infinity:maxFeatures;let indices=featureIndices&&featureIndices.length?featureIndices:Array.from({length:x[0].length},(_,i)=>i);if(indices.length>maxFeatures)indices=Array.from({length:maxFeatures},(_,i)=>indices[Math.min(indices.length-1,Math.floor(i*indices.length/maxFeatures))]);const use=indices.length===x[0].length&&indices.every((v,i)=>v===i)?x:x.map(r=>indices.map(j=>r[j]));if(!use[0]||!use[0].length)throw new Error("PCA found no features with finite data. Check the selected array and dimension assignments.");if(!use.every(r=>r.every(Number.isFinite)))throw new Error("PCA still found missing or non-finite values after feature filtering.");
     const z=standardized(use),n=z.length,p=z[0].length;if(n<2)throw new Error("PCA requires at least two observations.");let c;
     if(p<=n){c=Array.from({length:p},()=>Array(p).fill(0));for(let i=0;i<p;i++)for(let j=i;j<p;j++){let v=0;for(let t=0;t<n;t++)v+=z[t][i]*z[t][j];c[i][j]=c[j][i]=v/(n-1);}}
     else{c=Array.from({length:n},()=>Array(n).fill(0));for(let i=0;i<n;i++)for(let j=i;j<n;j++){let v=0;for(let f=0;f<p;f++)v+=z[i][f]*z[j][f];c[i][j]=c[j][i]=v/(n-1);}}
@@ -316,7 +323,7 @@
     $("ndx-time-summary").textContent="Open Across time to calculate the sliding-window result.";
     participants.forEach(p=>p.ratios=null);
     const select=$("ndx-participant");select.innerHTML='<option value="group">Group summary</option>'+participants.map((p,i)=>'<option value="'+i+'">'+p.name.replace(/[<>&]/g,"")+'</option>').join("");select.value="group";
-    const minT=Math.min(...participants.map(p=>p.matrix.length)),minF=Math.min(...participants.map(p=>p.matrix[0].length)),same=participants.every(p=>p.matrix.length===participants[0].matrix.length&&p.matrix[0].length===participants[0].matrix[0].length);
+    const minT=Math.min(...participants.map(p=>p.matrix.length)),minF=Math.min(...participants.map(p=>p.matrix[0].length)),same=participants.every(p=>p.matrix.length===participants[0].matrix.length&&p.matrix[0].length===participants[0].matrix[0].length),valid=Array(minF).fill(true);for(const p of participants)for(const row of p.matrix)for(let f=0;f<minF;f++)if(valid[f]&&!Number.isFinite(row[f]))valid[f]=false;withinFeatureIndices=valid.map((ok,i)=>ok?i:-1).filter(i=>i>=0);if(!withinFeatureIndices.length)throw new Error("No neural feature is finite across all included participants and time points.");const excluded=minF-withinFeatureIndices.length;if(excluded)$("ndx-status").textContent+=(" Excluded "+excluded+" of "+minF+" features containing missing or non-finite values; PCA uses the same "+withinFeatureIndices.length+" valid features for every participant.");
     $("ndx-shape").textContent=(same?participants[0].matrix.length:minT+"+")+" × "+(same?participants[0].matrix[0].length:minF+"+")+" × "+participants.length;
     $("ndx-window").max=Math.max(10,Math.min(200,minT));if(Number($("ndx-window").value)>minT)$("ndx-window").value=Math.max(10,Math.floor(minT/3));
     updateView();
@@ -331,7 +338,7 @@
   }
   async function spectraForView(job){
     const owner="pca:"+job,between=$("ndx-analysis-mode").value==="between";$("ndx-participant").disabled=between;
-    if(!between){const selected=selectedParticipants(),missing=selected.filter(p=>!p.ratios);if(missing.length){showBusy(owner,"Calculating full-feature dual PCA…","0 of "+missing.length+" participants");await nextPaint();for(let i=0;i<missing.length;i++){if(job!==pcaJob){hideBusy(owner);return null;}missing[i].ratios=spectrum(missing[i].matrix,Infinity);updateBusy(owner,"Calculating full-feature dual PCA…",(i+1)+" of "+missing.length+" participants · all "+missing[i].matrix[0].length+" features");await yieldBrowser();}}return selected;}
+    if(!between){const selected=selectedParticipants(),missing=selected.filter(p=>!p.ratios);if(missing.length){showBusy(owner,"Calculating full-feature dual PCA…","0 of "+missing.length+" participants");await nextPaint();for(let i=0;i<missing.length;i++){if(job!==pcaJob){hideBusy(owner);return null;}missing[i].ratios=spectrum(missing[i].matrix,Infinity,withinFeatureIndices);updateBusy(owner,"Calculating full-feature dual PCA…",(i+1)+" of "+missing.length+" participants · "+withinFeatureIndices.length+" valid features");await yieldBrowser();}}return selected;}
     if(!betweenGlobalRatios){showBusy(owner,"Calculating between-participant PCA…","Preparing participant comparison");await nextPaint();if(job!==pcaJob){hideBusy(owner);return null;}const minT=Math.min(...participants.map(p=>p.matrix.length));betweenGlobalRatios=spectrum(betweenMatrix(0,minT,800),800);}return [{name:"Between participants",ratios:betweenGlobalRatios}];
   }
   async function updateView(){
@@ -365,7 +372,7 @@
   }
 
   function windowStarts(length,win,step){const starts=[];for(let start=0;start+win<=length;start+=step)starts.push(start);return starts;}
-  async function timeSeries(p,starts,win,threshold,metric,job,owner,progress){const out=[];for(let i=0;i<starts.length;i++){if(job!==timeJob)return null;const start=starts[i],m=metrics(spectrum(p.matrix.slice(start,start+win)),threshold);out.push({x:start+win/2,y:metric==="pr"?m.pr:m.k});progress.done+=1;if(progress.done%2===0||progress.done===progress.total){updateBusy(owner,"Calculating full-feature sliding-window PCA…",progress.done+" of "+progress.total+" participant-windows");await yieldBrowser();}}return out;}
+  async function timeSeries(p,starts,win,threshold,metric,job,owner,progress){const out=[];for(let i=0;i<starts.length;i++){if(job!==timeJob)return null;const start=starts[i],m=metrics(spectrum(p.matrix.slice(start,start+win),Infinity,withinFeatureIndices),threshold);out.push({x:start+win/2,y:metric==="pr"?m.pr:m.k});progress.done+=1;if(progress.done%2===0||progress.done===progress.total){updateBusy(owner,"Calculating full-feature sliding-window PCA…",progress.done+" of "+progress.total+" participant-windows · "+withinFeatureIndices.length+" valid features");await yieldBrowser();}}return out;}
   async function updateTime(){
     if($("ndx-time-panel").hidden||!participants.length)return;const job=++timeJob,owner="time:"+job,between=$("ndx-analysis-mode").value==="between",base=between?participants:selectedParticipants(),win=Math.min(Number($("ndx-window").value),...base.map(p=>p.matrix.length)),step=Number($("ndx-step").value),threshold=Number($("ndx-threshold").value)/100,metric=$("ndx-metric").value;$("ndx-window-value").textContent=win;$("ndx-step-value").textContent=step;let pts=[];showBusy(owner,"Calculating sliding-window PCA…","Preparing windows");await nextPaint();
     try{if(job!==timeJob)return;if(between){const minT=Math.min(...participants.map(p=>p.matrix.length)),starts=windowStarts(minT,win,step);for(let i=0;i<starts.length;i++){if(job!==timeJob)return;const start=starts[i],m=metrics(spectrum(betweenMatrix(start,start+win,800),800),threshold),v=metric==="pr"?m.pr:m.k;pts.push({x:start+win/2,mean:v,min:v,max:v});if(i%2===1||i===starts.length-1){updateBusy(owner,"Calculating sliding-window PCA…",(i+1)+" of "+starts.length+" windows");await yieldBrowser();}}if(job!==timeJob)return;drawTime(pts,metric==="pr"?"Between-participant participation ratio":"Dimensions separating participants",false);$("ndx-time-summary").textContent=pts.length?"Each window distinguishes "+participants.length+" participants using up to 800 evenly sampled time–feature measurements.":"Window is too long for these data.";}
@@ -389,7 +396,7 @@
     else throw new Error("Do not mix binary, JSON, and table formats in one upload.");
     showLoadedArrays();
   }catch(err){$("ndx-status").textContent="Could not analyze the selected data: "+err.message;}finally{hideBusy(owner);}});
-  function reinterpretAxes(){if(!sourceCube)return;try{participants=cubeToParticipants(sourceCube,sourceNames);$("ndx-status").textContent="Axes reinterpreted as "+participants[0].matrix.length+" time points × "+participants[0].matrix[0].length+" features × "+participants.length+" participants.";analyzeAll();}catch(err){$("ndx-status").textContent=err.message;}}
+  async function reinterpretAxes(){if(!sourceCube)return;const job=++axisJob,owner="axes:"+job;showBusy(owner,"Reinterpreting dimensions…","Rebuilding participant matrices");await nextPaint();if(job!==axisJob)return;try{participants=cubeToParticipants(sourceCube,sourceNames);$("ndx-status").textContent="Axes reinterpreted as "+participants[0].matrix.length+" time points × "+participants[0].matrix[0].length+" features × "+participants.length+" participants.";analyzeAll();}catch(err){$("ndx-status").textContent=err.message;}finally{hideBusy(owner);}}
   function applySelectedArray(){const index=Number($("ndx-array").value);if(index!==activeArrayIndex)selectLoadedArray(index);}
   function refreshMode(){if($("ndx-analysis-mode").value==="within")$("ndx-participant").value="group";updateView();}
   function refreshParticipant(){updateView();}
@@ -399,7 +406,7 @@
 })();
 </script>
   </div>
-  <footer>Neural Dimensionality Explorer · Gabriel Braun · v1.7</footer>
+  <footer>Neural Dimensionality Explorer · Gabriel Braun · v1.8</footer>
 </main>
 </body>
 </html>

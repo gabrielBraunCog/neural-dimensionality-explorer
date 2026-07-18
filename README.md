@@ -14,6 +14,8 @@ An interactive, browser-based tool for exploring neural dimensionality with PCA.
 - Local browser processing: uploaded neural data are not sent to a server
 - Visible calculation progress for group and sliding-window analyses
 - Responsive, cancelable recalculation when arrays, participants, modes, windows, or thresholds change
+- Consistent missing-data handling: features containing non-finite values are excluded across all participants
+- Memory-efficient MATLAB decoding for large numeric arrays
 
 ## Publish with GitHub Pages
 
