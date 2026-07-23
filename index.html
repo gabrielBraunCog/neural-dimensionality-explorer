@@ -271,11 +271,37 @@
     const dimTag=matTag(view,o,little,false),dims=matNumbers(view,dimTag,little);o=dimTag.next;const nameTag=matTag(view,o,little,false),nameBytes=new Uint8Array(view.buffer,view.byteOffset+nameTag.dataOffset,nameTag.bytes),name=new TextDecoder().decode(nameBytes)||"unnamed";o=nameTag.next;
     if(isComplex||arrayClass<6||arrayClass>15)return null;const realTag=matTag(view,o,little,false),flat=matNumbers(view,realTag,little);if(!flat.length)return null;return {name,cube:matlabFlatToCube(flat,dims,name)};
   }
+  let hdf5ModulePromise=null;
+  function hdf5Progress(progress){if(busyOwner.startsWith("file:"))updateBusy(busyOwner,"Reading MATLAB v7.3/HDF5…",progress);}
+  async function parseMat73Buffer(buffer) {
+    hdf5Progress("Loading the HDF5 reader");
+    hdf5ModulePromise=hdf5ModulePromise||import("https://cdn.jsdelivr.net/npm/h5wasm@0.9.0/dist/esm/hdf5_hl.js");
+    const imported=await hdf5ModulePromise,h5=imported.default||imported,{FS}=await h5.ready,temp="/tmp/ndx-"+Date.now()+"-"+Math.random().toString(36).slice(2)+".mat",arrays=[],numericClasses=new Set(["double","single","int8","uint8","int16","uint16","int32","uint32","int64","uint64","logical"]);
+    let file=null;try{
+      hdf5Progress("Opening the local HDF5 file");
+      FS.writeFile(temp,new Uint8Array(buffer));file=new h5.File(temp,"r");
+      const keys=file.keys().filter(key=>key!=="#refs#");
+      for(let i=0;i<keys.length;i++){
+        const name=keys[i],obj=file.get(name);hdf5Progress("Inspecting "+name+" · "+(i+1)+" of "+keys.length);
+        if(!(obj instanceof h5.Dataset))continue;
+        const matlabClass=String(obj.attrs&&obj.attrs.MATLAB_class?obj.attrs.MATLAB_class.value:"").toLowerCase(),hdfShape=Array.from(obj.shape||[]);
+        if(!numericClasses.has(matlabClass)||hdfShape.length<2||hdfShape.length>3)continue;
+        let data=obj.value;if(!ArrayBuffer.isView(data)||data instanceof DataView)continue;
+        if(data instanceof BigInt64Array||data instanceof BigUint64Array)data=Float64Array.from(data,Number);
+        const matlabShape=hdfShape.slice().reverse();if(matlabShape.length===2)matlabShape.push(1);
+        if(data.length<matlabShape[0]*matlabShape[1]*matlabShape[2])continue;
+        arrays.push({name,cube:{shape:matlabShape,data,layout:"matlab-v7.3-column-major"}});
+        await yieldBrowser();
+      }
+    }finally{if(file)file.close();try{FS.unlink(temp);}catch(err){}}
+    if(!arrays.length)throw new Error("No supported real numeric 2D or 3D array was found in this MATLAB v7.3 file. Structs, cells, sparse arrays, strings, and complex arrays are not supported.");
+    return arrays;
+  }
   async function parseMatBuffer(buffer) {
-    const header=new TextDecoder().decode(new Uint8Array(buffer,0,Math.min(128,buffer.byteLength)));if(header.includes("MATLAB 7.3 MAT-file"))throw new Error("MATLAB v7.3/HDF5 files are not yet supported. Save with -v7 or upload .npy/.npz.");if(buffer.byteLength<128)throw new Error("This file is too short to be a MAT file.");
+    const header=new TextDecoder().decode(new Uint8Array(buffer,0,Math.min(128,buffer.byteLength)));if(header.includes("MATLAB 7.3 MAT-file"))return parseMat73Buffer(buffer);if(buffer.byteLength<128)throw new Error("This file is too short to be a MAT file.");
     const bytes=new Uint8Array(buffer),little=String.fromCharCode(bytes[126],bytes[127])==="IM",view=new DataView(buffer),arrays=[];let o=128;
     while(o+8<=buffer.byteLength){const tag=matTag(view,o,little,false);try{if(tag.type===14){const exact=buffer.slice(o,o+8+Math.ceil(tag.bytes/8)*8),item=parseMatMatrix(exact,little);if(item)arrays.push(item);}else if(tag.type===15){const zip=await import("https://cdn.jsdelivr.net/npm/fflate@0.8.2/+esm"),compressed=new Uint8Array(buffer,tag.dataOffset,tag.bytes),plain=zip.unzlibSync(compressed),exact=plain.byteOffset===0&&plain.byteLength===plain.buffer.byteLength?plain.buffer:plain.buffer.slice(plain.byteOffset,plain.byteOffset+plain.byteLength),item=parseMatMatrix(exact,little);if(item)arrays.push(item);}}catch(err){}o=tag.type===15?tag.dataOffset+tag.bytes:tag.next;}
-    if(!arrays.length)throw new Error("No supported real numeric 2D or 3D array was found. MATLAB v7.3/HDF5, structs, cells, sparse arrays, and complex arrays are not supported.");return arrays;
+    if(!arrays.length)throw new Error("No supported real numeric 2D or 3D array was found. Structs, cells, sparse arrays, and complex arrays are not supported.");return arrays;
   }
   function cubeShape(cube){return cube&&cube.shape&&cube.data?cube.shape:[cube.length,cube[0].length,cube[0][0].length];}
   function cubeValue(cube,i,j,k){if(cube&&cube.shape&&cube.data){const d1=cube.shape[0],d2=cube.shape[1];return Number(cube.data[i+d1*(j+d2*k)]);}return cube[i][j][k];}
@@ -407,7 +433,7 @@
 })();
 </script>
   </div>
-  <footer>Neural Dimensionality Explorer · Gabriel Braun · v1.9</footer>
+  <footer>Neural Dimensionality Explorer · Gabriel Braun · v2.0</footer>
 </main>
 </body>
 </html>

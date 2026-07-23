@@ -10,13 +10,14 @@ An interactive, browser-based tool for exploring neural dimensionality with PCA.
 - Participation ratio and variance-threshold measures
 - Sliding-window analysis
 - Multiple-participant data
-- CSV, TSV, JSON, MATLAB `.mat`, NumPy `.npy`, and `.npz` input
+- CSV, TSV, JSON, MATLAB `.mat` (including v7.3/HDF5), NumPy `.npy`, and `.npz` input
 - Local browser processing: uploaded neural data are not sent to a server
 - Visible calculation progress for group and sliding-window analyses
 - Responsive, cancelable recalculation when arrays, participants, modes, windows, or thresholds change
 - Consistent missing-data handling: features containing non-finite values are excluded across all participants
 - Memory-efficient MATLAB decoding for large numeric arrays
 - Correct tab visibility so sliding-window PCA runs only when Across time is selected
+- Native MATLAB v7.3/HDF5 decoding for real, dense numeric 2D and 3D arrays
 
 ## Publish with GitHub Pages
 
